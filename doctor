@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC1090
+
+# Take care of installing bash completion as needed.
+if [[ "$1" = "init" ]]; then
+  shift
+  # To get bash completion for doctor, put the following line in your .bashrc.
+  # Note: doctor must be in your path for this to work.
+  #
+  # eval "$(doctor init)"
+  #
+  cat <<InitScript
+_doctor() {
+  local cur prev opts
+  COMPREPLY=()
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+  opts="\$(doctor --complete)"
+  COMPREPLY=( \$(compgen -W "\${opts}" -- \${cur}) )
+  return 0
+}
+complete -F _doctor doctor
+InitScript
+  exit 0
+fi
+
+# MacOS does not come with realpath.
+case "$(uname)" in
+  Darwin)
+    # MacOS lacks realpath. Use Perl.
+    realpath() {
+      dirname="$(perl -e 'use Cwd "abs_path"; print abs_path(shift)' "$1")"
+      echo "$dirname"
+    }
+    ;;
+esac
+
+load-library() {
+  library=$1
+  # Load our helper functions.
+  . "$library" || {
+    echo "$0: failed to load '$library'!" >&2
+    exit 1
+  }
+}
+
+libraries=(
+  "$(dirname "$0")/utils.sh"
+)
+for library in "${libraries[@]}"; do
+  load-library "$library"
+done
+
+doctor-run() (
+  doctor_deps="${1:-doctor-deps.sh}"
+  if [[ -z "$doctor_deps" ]]; then
+    die "please specify the doctor checklist file to run through (usually called doctor-deps.sh"
+  fi
+
+  if [[ -f "$doctor_deps" ]]; then
+    . "$doctor_deps"
+  else
+    die "no deps file found [filename=$doctor_deps]"
+  fi
+  inform "Running doctor..."
+
+  # Check that there is an installation function for all of the deps.
+  for dep in "${DEPS[@]}"; do
+    if ! grep "fix-$dep" <(declare -F) >/dev/null; then
+      die "fatal: missing declaration of 'fix-$dep'. this is a bug in bin/deps.sh."
+    fi
+  done
+
+  while read -r dep; do
+    # shellcheck disable=SC2076
+    if ! [[ " ${DEPS[*]} " =~ " $dep " ]]; then
+      die "found a deps.sh function that does not correspond to DEPS [function_name=broken-$dep]"
+    fi
+  done < <(declare -F | grep -Eo ' broken-.*$' | cut -d'-' -f2-)
+
+  ensure-deps
+
+  inform "Success!"
+)
+
+if [[ -n $1 ]]; then
+  cmd=$1
+  shift
+else
+  cmd=run
+fi
+
+usage() {
+  printf "::: doctor :::\nDoctor helps manage your dependencies.\n\nCommands: "
+  declare -F | sed -E -ne 's/.*doctor-(.*)$/\tdoctor \1/p'
+  exit 0
+}
+
+ensure-deps() {
+  deactivate 1>/dev/null 2>/dev/null ||:
+
+  for DEP in "${DEPS[@]}"; do
+    # shellcheck disable=SC2076
+    if [[ " ${IGNORE_DEPS[*]} " =~ " $DEP " ]]; then
+        warn "Skipping check for '$DEP' as per IGNORE_DEPS..."
+        continue
+    fi
+    if is-broken-dep "$DEP"; then
+      inform "Fixing dependency '$DEP'..."
+      "fix-$DEP"
+    else
+      inform "$DEP is OK."
+      continue
+    fi
+    if is-broken-dep "$DEP"; then
+      die "Failed to completely fix $DEP. You may need to clean something up locally, investigate a bit more, or ask for help!"
+    fi
+    inform "Successfully configured $DEP!"
+  done
+}
+if [[ "$( declare -F | grep -oe "\bdoctor-$cmd$" )" = "doctor-$cmd" ]] 2>/dev/null; then
+  "doctor-$cmd" "$@"
+else
+  if [[ -n "$cmd" ]]; then
+    inform "unable to find command '$cmd'" >&2
+  fi
+  usage
+fi
